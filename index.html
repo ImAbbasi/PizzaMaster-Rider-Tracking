@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>OvenX Dispatch PRO</title>
+    
+    <!-- PWA Installation Support -->
+    <link rel="manifest" href="data:application/manifest+json,{'name':'OvenX','short_name':'OvenX','start_url':'.','display':'standalone','background_color':'#8b0000','theme_color':'#8b0000','icons':[{'src':'https://cdn-icons-png.flaticon.com/512/7541/7541900.png','sizes':'512x512','type':'image/png'}]}">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+
+    <style>
+        :root { --red: #8b0000; --orange: #f37021; }
+        body, html { margin: 0; padding: 0; font-family: sans-serif; height: 100%; background: #000; color: white; overflow: hidden; }
+        header { background: var(--red); padding: 15px; display: flex; justify-content: space-between; align-items: center; border-bottom: 4px solid var(--orange); }
+        .screen { display: none; height: calc(100vh - 65px); width: 100%; position: relative; }
+        .active { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .card { background: #fff; color: #333; padding: 25px; border-radius: 20px; width: 85%; max-width: 350px; text-align: center; }
+        .btn { width: 100%; padding: 18px; border-radius: 50px; border: none; font-weight: bold; font-size: 16px; margin-top: 15px; cursor: pointer; }
+        .btn-start { background: var(--orange); color: white; }
+        #map { height: 100%; width: 100%; }
+        #admin-info { position: absolute; top: 10px; left: 10px; z-index: 1000; background: white; color: #000; padding: 12px; border-radius: 10px; width: 180px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-size: 12px; }
+        .status-dot { height: 10px; width: 10px; background: #2ecc71; border-radius: 50%; display: inline-block; margin-right: 5px; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body>
+
+<header>
+    <h2 style="margin:0;">OVEN <span style="color:var(--orange)">X</span></h2>
+    <div id="status-text" style="font-size: 10px; font-weight: bold;">STANDBY</div>
+</header>
+
+<div id="screen-start" class="screen active">
+    <div class="card">
+        <h2 style="color:var(--red);">Rider Portal</h2>
+        <input type="text" id="riderName" placeholder="Enter Full Name" style="width:100%; padding:15px; border:1px solid #ddd; border-radius:10px; text-align:center; font-size:18px;">
+        <button class="btn btn-start" onclick="startTracking()">START SHIFT</button>
+        <button onclick="showAdminLogin()" style="margin-top:20px; background:none; border:none; color:#999; text-decoration:underline;">Admin Login</button>
+    </div>
+</div>
+
+<div id="screen-admin-login" class="screen">
+    <div class="card">
+        <h3>Admin Access</h3>
+        <input type="password" id="adminPass" placeholder="Password" style="width:100%; padding:15px; border:1px solid #ddd; border-radius:10px; text-align:center;">
+        <button class="btn btn-start" onclick="adminAuth()">Login</button>
+    </div>
+</div>
+
+<div id="screen-rider-active" class="screen">
+    <div class="card">
+        <h1 id="activeNameDisplay"></h1>
+        <div style="font-size: 50px; margin: 20px;">📡</div>
+        <p><span class="status-dot"></span> LIVE TRACKING ON</p>
+        <p style="font-size: 11px; color: #666;">SHIFT ENDS AUTOMATICALLY AT 2:00 AM<br>Keep this app open in background.</p>
+        <button onclick="location.reload()" style="background:none; border:none; color:red; text-decoration:underline;">Stop Tracking</button>
+    </div>
+</div>
+
+<div id="screen-admin-map" class="screen">
+    <div id="admin-info">
+        <b>Live Fleet</b><hr>
+        <div id="rider-list">Waiting for signals...</div>
+    </div>
+    <div id="map"></div>
+</div>
+
+<!-- Invisible audio to prevent background sleep -->
+<audio id="stayAliveAudio" loop playsinline src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA=="></audio>
+
+<script>
+    const firebaseConfig = { databaseURL: "https://ovenx-tracking-default-rtdb.asia-southeast1.firebasedatabase.app/" };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const SHOP = [30.216949, 71.470271];
+    let map, markers = {}, watchID, wakeLock = null;
+
+    function showScreen(id) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    }
+
+    function showAdminLogin() { showScreen('screen-admin-login'); }
+
+    function adminAuth() {
+        if(document.getElementById('adminPass').value === 'asdasd@123') {
+            showScreen('screen-admin-map');
+            initMap();
+        } else { alert("Wrong Password"); }
+    }
+
+    function initMap() {
+        if(map) return;
+        map = L.map('map', { zoomControl: false }).setView(SHOP, 14);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        L.marker(SHOP).addTo(map).bindTooltip("HQ - MULTAN", {permanent:true});
+
+        db.ref('riders').on('value', snap => {
+            const data = snap.val();
+            const list = document.getElementById('rider-list');
+            list.innerHTML = '';
+            for(let id in data) {
+                const r = data[id];
+                const active = (Date.now() - r.t) < 60000;
+                if(active) {
+                    if(markers[id]) markers[id].setLatLng([r.lat, r.lng]);
+                    else markers[id] = L.marker([r.lat, r.lng]).addTo(map).bindTooltip(r.name, {permanent:true});
+                    list.innerHTML += `<div>🟢 ${r.name}</div>`;
+                }
+            }
+        });
+    }
+
+    async function startTracking() {
+        const name = document.getElementById('riderName').value.trim();
+        if(!name) return alert("Enter Name");
+        
+        document.getElementById('activeNameDisplay').innerText = name;
+        showScreen('screen-rider-active');
+
+        // FORCE SCREEN & CPU TO STAY ON
+        try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+        document.getElementById('stayAliveAudio').play();
+
+        // PERSISTENT GPS LOOP
+        watchID = navigator.geolocation.watchPosition(pos => {
+            // Auto-Stop at 2:00 AM
+            const now = new Date();
+            if(now.getHours() === 2 && now.getMinutes() === 0) location.reload();
+
+            db.ref('riders/' + name.replace(/\s/g,'_')).set({
+                name: name,
+                lat: pos.coords.latitude,
+                lng: pos.coords.longitude,
+                t: Date.now()
+            });
+            document.getElementById('status-text').innerText = "SIGNAL ACTIVE";
+        }, null, { 
+            enableHighAccuracy: true, 
+            maximumAge: 0, 
+            timeout: 10000 
+        });
+    }
+
+    // Re-acquire lock if user switches apps and comes back
+    document.addEventListener('visibilitychange', async () => {
+        if (wakeLock !== null && document.visibilityState === 'visible') {
+            wakeLock = await navigator.wakeLock.request('screen');
+        }
+    });
+</script>
+</body>
+</html>
